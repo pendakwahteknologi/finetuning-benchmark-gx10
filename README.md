@@ -172,6 +172,8 @@ python3 -m benchmark_cuda run --mode fullft --machine-label gx10 --max-steps 500
 
 ### Run All Three Sequentially (Background)
 
+Each benchmark takes several hours (LoRA ~5h, QLoRA ~5h, Full FT ~8h+ on the GX10). You can run all three back-to-back in the background so you don't need to babysit the terminal:
+
 ```bash
 nohup bash -c '
 python3 -m benchmark_cuda run --mode lora --machine-label gx10 --max-steps 500 2>&1 | tee lora_run.log
@@ -181,10 +183,52 @@ python3 -m benchmark_cuda compare --results-dir ./results 2>&1 | tee compare_run
 ' > benchmark_all.log 2>&1 &
 ```
 
-Monitor progress:
+This runs LoRA first, then QLoRA, then Full FT, and finally produces a comparison — all automatically. You can safely close the terminal or SSH session and come back later. All results are saved to `./results/`.
+
+### Monitoring Progress
 
 ```bash
-tail -5 benchmark_all.log
+# See the latest output
+tail -20 benchmark_all.log
+
+# Follow live (Ctrl+C to stop watching, benchmark continues)
+tail -f benchmark_all.log
+
+# Check which mode is currently running
+grep -E "Mode:|Step " benchmark_all.log | tail -5
+
+# Check if the background job is still running
+jobs
+# or
+ps aux | grep benchmark_cuda | grep -v grep
+
+# Check GPU activity
+nvidia-smi
+```
+
+### Checking Individual Run Logs
+
+Each mode also writes its own log file:
+
+```bash
+tail -20 lora_run.log      # LoRA progress
+tail -20 qlora_run.log     # QLoRA progress
+tail -20 fullft_run.log    # Full FT progress
+tail -20 compare_run.log   # Final comparison output
+```
+
+### When It's Done
+
+When all benchmarks are complete, you'll find result folders in `./results/`:
+
+```bash
+ls ./results/
+```
+
+Each folder contains the full metrics, logs, and evaluation artifacts. Run the compare command to see the final summary table:
+
+```bash
+python3 -m benchmark_cuda compare --results-dir ./results
 ```
 
 ### Compare Results
