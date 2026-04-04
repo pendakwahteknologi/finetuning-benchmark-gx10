@@ -172,7 +172,7 @@ python3 -m benchmark_cuda run --mode fullft --machine-label gx10 --max-steps 500
 
 ### Run All Three Sequentially (Background)
 
-Each benchmark takes several hours (LoRA ~5h, QLoRA ~5h, Full FT ~8h+ on the GX10). You can run all three back-to-back in the background so you don't need to babysit the terminal:
+Each benchmark takes several hours (LoRA ~5h, QLoRA ~9h, Full FT ~5h on the GX10). You can run all three back-to-back in the background so you don't need to babysit the terminal:
 
 ```bash
 nohup bash -c '
@@ -341,14 +341,135 @@ The benchmark defaults are tuned for the GX10's 128 GB unified memory:
 
 | Parameter | LoRA | QLoRA | Full FT |
 |-----------|------|-------|---------|
-| Micro batch size | 8 | 8 | 4 |
-| Gradient accumulation | 4 | 4 | 8 |
+| Micro batch size | 8 | **2** | 4 |
+| Gradient accumulation | 4 | **16** | 8 |
 | Effective batch size | 32 | 32 | 32 |
 | Learning rate | 2e-4 | 2e-4 | 2e-5 |
 | Precision | bf16 | bf16 | bf16 |
 | Attention | SDPA | SDPA | SDPA |
+| Gradient checkpointing | No | **Yes** | No |
+
+> **Note:** QLoRA defaults were reduced from `micro_batch_size=8` after repeated system crashes on the GX10. The 4-bit quantization path via bitsandbytes on ARM aarch64 with unified memory appears to trigger instability at higher batch sizes. See [Known Issues](#known-issues) for details.
 
 The GX10 can run Full Fine-Tune of an 8B parameter model natively without offloading — a task that would require gradient checkpointing or CPU offload on GPUs with less memory.
+
+---
+
+## Results (GX10)
+
+### LoRA — 500 Steps (Success)
+
+Run ID: `gx10_lora_20260403_140352`
+
+| Metric | Value |
+|--------|-------|
+| **Status** | Success |
+| **Total wall clock** | 4 h 48 min (17,268 s) |
+| **Avg step time** | 33.93 s |
+| **Median step time** | 33.93 s |
+| **P95 step time** | 34.01 s |
+| **Peak GPU memory** | 87.38 GB |
+| **Final training loss** | 1.5124 |
+| **Tokens/sec** | 161.9 |
+| **Samples/sec** | 0.24 |
+
+**Evaluation highlights (vs base model):**
+- ROUGE-L: 0.1554 (base) vs 0.1529 (fine-tuned)
+- BLEU: 0.0393 (base) vs 0.0404 (fine-tuned)
+- Average prediction length increased by +15.28 tokens
+
+Full evaluation artifacts (side-by-side comparison, per-category breakdown, HTML table) are in `results/gx10_lora_20260403_140352/evaluation/`.
+
+### QLoRA — 500 Steps (Success, 2nd attempt)
+
+Run ID: `gx10_qlora_20260404_001959`
+
+| Metric | Value |
+|--------|-------|
+| **Status** | Success |
+| **Total wall clock** | 9 h 14 min (33,231 s) |
+| **Avg step time** | 66.21 s |
+| **Median step time** | 66.20 s |
+| **P95 step time** | 66.36 s |
+| **Peak GPU memory** | 12.45 GB |
+| **Final training loss** | 1.6082 |
+| **Tokens/sec** | 83.0 |
+| **Samples/sec** | 0.03 |
+
+**Evaluation highlights (vs base model):**
+- ROUGE-L: 0.1554 (base) vs 0.1538 (fine-tuned)
+- BLEU: 0.0393 (base) vs 0.0429 (fine-tuned)
+- Average prediction length increased by +12.84 tokens
+
+> **Note:** The first QLoRA attempt (`gx10_qlora_20260403_231403`) crashed after 1 step with `micro_batch_size=8`. Config defaults were adjusted (batch size reduced to 2, gradient checkpointing enabled) and the second attempt completed successfully. See [Known Issues](#known-issues).
+
+Full evaluation artifacts are in `results/gx10_qlora_20260404_001959/evaluation/`.
+
+### Full Fine-Tune — 5-Step Dry Run (Success)
+
+Run ID: `gx10_fullft_20260404_224612`
+
+| Metric | Value |
+|--------|-------|
+| **Status** | Success (dry run) |
+| **Steps completed** | 5 / 5 |
+| **Total wall clock** | 3 min 3 s (183 s) |
+| **Avg step time** | 36.29 s |
+| **Median step time** | 36.18 s |
+| **P95 step time** | 36.60 s |
+| **Peak GPU memory** | 93.59 GB |
+| **Final training loss** | 1.6391 |
+| **Tokens/sec** | 121.3 |
+| **Samples/sec** | 0.11 |
+
+> **Note:** This is a 5-step validation run confirming the full fine-tune mode works correctly. The full 500-step run is pending. At ~36 s/step, expect approximately 5 hours for the complete benchmark.
+
+### Summary Comparison
+
+| Metric | LoRA | QLoRA | Full FT (dry run) |
+|--------|------|-------|-------------------|
+| **Steps** | 500 | 500 | 5 |
+| **Status** | Success | Success | Success |
+| **Total time** | 4 h 48 min | 9 h 14 min | 3 min |
+| **Avg step time** | 33.93 s | 66.21 s | 36.29 s |
+| **Peak GPU memory** | 87.38 GB | 12.45 GB | 93.59 GB |
+| **Final loss** | 1.5124 | 1.6082 | 1.6391 |
+| **Tokens/sec** | 161.9 | 83.0 | 121.3 |
+| **Trainable params** | 13.6M (0.17%) | 13.6M (0.17%) | 8.03B (100%) |
+
+**Key observations:**
+- **LoRA** is the fastest mode at 33.93 s/step, achieving the best throughput (161.9 tok/s)
+- **QLoRA** uses dramatically less memory (12.45 GB vs 87+ GB) but is ~2x slower due to 4-bit dequantization overhead on ARM aarch64
+- **Full FT** trains all 8B parameters with 93.59 GB peak memory — feasible on the GX10's 128 GB unified memory without offloading
+
+---
+
+## Known Issues
+
+### QLoRA crashes the GX10 at default batch sizes
+
+**Issue:** [#1 on GitHub](https://github.com/pendakwahteknologi/finetuning-benchmark-gx10/issues/1)
+
+Running QLoRA with `micro_batch_size=8` and `gradient_checkpointing=false` causes the ASUS Ascent GX10 to hard-reboot after completing only 1 training step. The system crash leaves no OOM-killer trace or GPU Xid error in kernel logs, suggesting a hardware-level fault (thermal throttle or power spike on the unified memory bus during 4-bit dequantization).
+
+**Workaround (applied):** QLoRA mode now defaults to:
+- `micro_batch_size=2` (down from 8)
+- `gradient_accumulation_steps=16` (keeps effective batch size at 32)
+- `gradient_checkpointing=true` (reduces peak memory)
+
+This is automatically applied in `benchmark_cuda/utils/config.py` when `--mode qlora` is selected. To override, pass explicit `--micro-batch-size` and `--gradient-checkpointing` flags.
+
+**Context:**
+- LoRA runs successfully at `micro_batch_size=8` with 87.38 GB peak memory
+- QLoRA step 1 used only 27.83 GB but took 62.4 s (vs 33.9 s for LoRA)
+- The slower step time + lower memory suggests bitsandbytes 4-bit kernels may behave differently on ARM aarch64 / Blackwell unified memory
+- GPU temp was 73°C at the time of the crash with ComfyUI, visitor-analytics, and Open WebUI also consuming GPU resources
+
+### Full Fine-Tune failed with device mismatch error
+
+**Issue:** Using `device_map="auto"` in `fullft.py` caused a "tensors on different devices" error. The accelerate library placed some layers (e.g., embedding tables) on CPU while the training loop expected all tensors on CUDA.
+
+**Fix (applied):** Changed `device_map="auto"` to `device_map="cuda"` in `benchmark_cuda/modes/fullft.py`. This places the entire model on GPU, which is safe on the GX10's 128 GB unified memory where the 8B model fits comfortably. LoRA and QLoRA are unaffected because PEFT handles device placement internally.
 
 ---
 

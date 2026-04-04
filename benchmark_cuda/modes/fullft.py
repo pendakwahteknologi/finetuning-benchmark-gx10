@@ -26,11 +26,14 @@ def setup_fullft(config: BenchmarkConfig) -> tuple:
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
     # Load base model — no PEFT, no quantization
+    # Use device_map="cuda" to place all parameters on GPU.
+    # "auto" can split layers across CPU/GPU, causing device mismatch errors
+    # during training when all tensors must be on the same device.
     model = AutoModelForCausalLM.from_pretrained(
         config.model_name,
         dtype=model_dtype,
         attn_implementation=config.attn_implementation,
-        device_map="auto",
+        device_map="cuda",
     )
 
     # Ensure ALL parameters are trainable

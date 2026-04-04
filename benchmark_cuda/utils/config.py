@@ -83,6 +83,16 @@ class BenchmarkConfig:
             self.run_dir = os.path.join(self.output_dir, self.run_id)
 
         # Mode-specific overrides
+        if self.mode == "qlora":
+            # QLoRA on GB10 (unified memory / ARM aarch64) is prone to system
+            # crashes at higher batch sizes.  Conservative defaults keep the run
+            # stable — see GitHub issue for details.
+            if self.micro_batch_size > 2:
+                self.micro_batch_size = 2
+                self.gradient_accumulation_steps = 16  # keep effective batch = 32
+            if not self.gradient_checkpointing:
+                self.gradient_checkpointing = True
+
         if self.mode == "fullft":
             if self.micro_batch_size > 4:
                 self.micro_batch_size = 4
