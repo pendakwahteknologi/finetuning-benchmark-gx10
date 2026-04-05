@@ -127,9 +127,17 @@ Output:
 HELPTEXT
             exit 0
             ;;
-        *)
+        --model|--micro-batch-size|--grad-accum|--learning-rate|--lr|--dtype|--lora-r|--lora-alpha|--seed|--logging-steps|--eval-steps|--seq-len|--warmup-steps)
+            EXTRA_ARGS="$EXTRA_ARGS $1 $2"
+            shift 2
+            ;;
+        --gradient-checkpointing|--skip-eval)
             EXTRA_ARGS="$EXTRA_ARGS $1"
             shift
+            ;;
+        *)
+            echo "Unknown option: $1 (use --help for usage)"
+            exit 1
             ;;
     esac
 done
