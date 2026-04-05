@@ -22,6 +22,7 @@ set -euo pipefail
 
 MACHINE_LABEL="gx10"
 MAX_STEPS=500
+EPOCHS=""
 MODES="lora qlora fullft"
 DRY_RUN=false
 RESULTS_DIR="./results"
@@ -37,6 +38,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --steps)
             MAX_STEPS="$2"
+            shift 2
+            ;;
+        --epochs)
+            EPOCHS="$2"
             shift 2
             ;;
         --machine-label)
@@ -57,13 +62,15 @@ while [[ $# -gt 0 ]]; do
             echo "Options:"
             echo "  --dry-run               Quick test (5 steps, skip eval)"
             echo "  --steps N               Number of training steps (default: 500)"
+            echo "  --epochs N              Train for N epochs (alternative to --steps)"
             echo "  --machine-label LABEL   Machine identifier (default: gx10)"
             echo "  --modes \"m1 m2 ...\"     Modes to run (default: \"lora qlora fullft\")"
             echo "  --results-dir DIR       Results directory (default: ./results)"
             echo "  --help                  Show this help"
             echo ""
             echo "Examples:"
-            echo "  ./run_all.sh                                    # Full benchmark"
+            echo "  ./run_all.sh                                    # Full benchmark (500 steps)"
+            echo "  ./run_all.sh --epochs 1                         # Train for 1 full epoch"
             echo "  ./run_all.sh --dry-run                          # Quick sanity check"
             echo "  ./run_all.sh --steps 100 --modes \"lora fullft\"  # Custom run"
             echo "  nohup ./run_all.sh > benchmark_all.log 2>&1 &   # Background"
@@ -106,7 +113,11 @@ separator() {
 separator "PRE-FLIGHT CHECKS"
 
 log "Machine label: $MACHINE_LABEL"
-log "Max steps:     $MAX_STEPS"
+if [ -n "$EPOCHS" ]; then
+    log "Epochs:        $EPOCHS"
+else
+    log "Max steps:     $MAX_STEPS"
+fi
 log "Modes:         $MODES"
 log "Results dir:   $RESULTS_DIR"
 log "Dry run:       $DRY_RUN"
@@ -172,7 +183,12 @@ for MODE in $MODES; do
     log "Mode log: $MODE_LOG"
 
     # Build command
-    CMD="python3 -m benchmark_cuda run --mode $MODE --machine-label $MACHINE_LABEL --max-steps $MAX_STEPS --output-dir $RESULTS_DIR"
+    CMD="python3 -m benchmark_cuda run --mode $MODE --machine-label $MACHINE_LABEL --output-dir $RESULTS_DIR"
+    if [ -n "$EPOCHS" ]; then
+        CMD="$CMD --epochs $EPOCHS"
+    else
+        CMD="$CMD --max-steps $MAX_STEPS"
+    fi
     if [ "$DRY_RUN" = true ]; then
         CMD="$CMD --dry-run"
     fi

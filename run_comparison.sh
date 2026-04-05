@@ -106,18 +106,59 @@ echo ""
 python3 -m benchmark_cuda cross-compare --results-dir "$RESULTS_DIR"
 
 echo ""
+
+# ─── Step 3: Training plots ─────────────────────────────────────────────────
+
+echo "================================================================"
+echo "  STEP 3: TRAINING PLOTS (Loss Curves, GPU Memory, Step Time)"
+echo "================================================================"
+echo ""
+
+python3 -m benchmark_cuda plot --results-dir "$RESULTS_DIR"
+
+echo ""
+
+# ─── Step 4: LLM-as-Judge (optional) ────────────────────────────────────────
+
+echo "================================================================"
+echo "  STEP 4: LLM-AS-JUDGE EVALUATION (Claude API)"
+echo "================================================================"
+echo ""
+
+if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+    echo "  Anthropic API key found. Running LLM judge evaluation..."
+    echo "  (This will make API calls — may take a few minutes)"
+    echo ""
+    python3 -m benchmark_cuda judge --results-dir "$RESULTS_DIR" || {
+        echo ""
+        echo "  WARNING: LLM judge evaluation failed (non-fatal)."
+        echo "  Check your ANTHROPIC_API_KEY or API quota."
+    }
+else
+    echo "  Skipped: ANTHROPIC_API_KEY not set."
+    echo "  To enable: export ANTHROPIC_API_KEY=your-key-here"
+    echo "  Then re-run: ./run_comparison.sh"
+fi
+
+echo ""
 echo "================================================================"
 echo "  DONE"
 echo "================================================================"
 echo ""
 echo "  All reports saved to: $RESULTS_DIR/cross_comparison/"
 echo ""
-echo "  Open the HTML report in your browser:"
-echo "    $RESULTS_DIR/cross_comparison/cross_comparison.html"
+echo "  Reports:"
+echo "    $RESULTS_DIR/cross_comparison/cross_comparison.html   (interactive HTML)"
+echo "    $RESULTS_DIR/cross_comparison/cross_comparison.md     (markdown)"
+echo "    $RESULTS_DIR/cross_comparison/cross_comparison.csv    (spreadsheet)"
 echo ""
-echo "  Markdown report for class/README:"
-echo "    $RESULTS_DIR/cross_comparison/cross_comparison.md"
+echo "  Plots:"
+echo "    $RESULTS_DIR/cross_comparison/loss_curves.png"
+echo "    $RESULTS_DIR/cross_comparison/gpu_memory.png"
+echo "    $RESULTS_DIR/cross_comparison/step_time.png"
 echo ""
-echo "  CSV for spreadsheet analysis:"
-echo "    $RESULTS_DIR/cross_comparison/cross_comparison.csv"
+if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+echo "  LLM Judge:"
+echo "    $RESULTS_DIR/cross_comparison/llm_judge_cross_compare.json"
+fi
 echo ""

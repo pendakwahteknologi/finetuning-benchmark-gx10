@@ -8,3 +8,5 @@ rich
 typer>=0.9.0
 rouge-score
 nltk
+matplotlib
+anthropic

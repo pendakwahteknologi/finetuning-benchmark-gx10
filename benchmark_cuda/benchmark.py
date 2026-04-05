@@ -55,7 +55,8 @@ def run(
     model: str = typer.Option(
         "meta-llama/Llama-3.1-8B-Instruct", "--model", help="HuggingFace model name"
     ),
-    max_steps: int = typer.Option(500, "--max-steps", help="Number of optimizer steps"),
+    max_steps: Optional[int] = typer.Option(None, "--max-steps", help="Number of optimizer steps (default: 500, or computed from --epochs)"),
+    epochs: Optional[float] = typer.Option(None, "--epochs", help="Number of training epochs (alternative to --max-steps)"),
     warmup_steps: int = typer.Option(3, "--warmup-steps", help="Steps excluded from timing"),
     seq_len: int = typer.Option(1024, "--seq-len", help="Maximum sequence length"),
     micro_batch_size: Optional[int] = typer.Option(None, "--micro-batch-size", help="Batch size per step"),
@@ -85,12 +86,15 @@ def run(
         console.print("[red]CUDA is not available. This benchmark requires an NVIDIA GPU.[/]")
         raise typer.Exit(1)
 
+    # Resolve max_steps vs epochs (epochs computed after dataset prep)
+    resolved_steps = max_steps if max_steps is not None else (None if epochs else 500)
+
     # Build config
     config = BenchmarkConfig(
         machine_label=machine_label,
         mode=mode,
         model_name=model,
-        max_steps=5 if dry_run else max_steps,
+        max_steps=5 if dry_run else (resolved_steps or 500),
         warmup_steps=min(warmup_steps, 1) if dry_run else warmup_steps,
         seq_len=seq_len,
         dtype=dtype,
@@ -168,6 +172,15 @@ def run(
     console.print(f"  Train:       {manifest['train_count']:,} samples")
     console.print(f"  Validation:  {manifest['val_count']:,} samples")
     console.print(f"  Test:        {manifest['test_count']:,} samples")
+
+    # Compute max_steps from epochs if specified
+    if epochs is not None and not dry_run:
+        steps_per_epoch = manifest['train_count'] // config.effective_batch_size
+        computed_steps = int(steps_per_epoch * epochs)
+        config.max_steps = max(computed_steps, 1)
+        console.print(f"  Epochs:      {epochs} ({steps_per_epoch} steps/epoch = {config.max_steps} steps)")
+        config.add_fairness_note(f"epoch-based training: {epochs} epochs = {config.max_steps} steps")
+
     console.print()
 
     # Prepare preset questions
@@ -238,6 +251,18 @@ def run(
             console.print(f"[yellow]Evaluation failed: {e}[/]")
             logger.error(f"Evaluation failed: {e}", exc_info=True)
 
+        # Perplexity evaluation
+        try:
+            from .evaluation.perplexity import compute_and_save_perplexity
+            test_path = os.path.join(config.data_dir, "test.jsonl")
+            if os.path.isfile(test_path):
+                compute_and_save_perplexity(
+                    model_obj, tokenizer, config, config.run_dir, test_path
+                )
+        except Exception as e:
+            console.print(f"[yellow]Perplexity evaluation failed: {e}[/]")
+            logger.error(f"Perplexity evaluation failed: {e}", exc_info=True)
+
     # Final banner
     if metrics.status == "success":
         print_success_banner(config.run_dir)
@@ -274,6 +299,31 @@ def cross_compare(
     """Cross-mode comparison: Base vs LoRA vs QLoRA vs Full Fine-Tune."""
     from .evaluation.cross_compare import run_cross_compare
     run_cross_compare(results_dir, output_dir)
+
+
+@app.command("plot")
+def plot(
+    results_dir: str = typer.Option("./results", "--results-dir", "-d", help="Results directory"),
+    output_dir: Optional[str] = typer.Option(None, "--output-dir", "-o", help="Output directory for plots"),
+):
+    """Generate training loss curves, GPU memory, and step time plots."""
+    from .evaluation.plot_loss_curves import generate_all_plots
+    generate_all_plots(results_dir, output_dir)
+
+
+@app.command("judge")
+def judge(
+    results_dir: str = typer.Option("./results", "--results-dir", "-d", help="Results directory"),
+    cross_compare_mode: bool = typer.Option(True, "--cross-compare/--per-mode", help="Judge all modes together or separately"),
+):
+    """Run LLM-as-judge evaluation using Claude API."""
+    from .evaluation.llm_judge import run_llm_judge_cross_compare, run_llm_judge_evaluation, print_judge_summary
+    if cross_compare_mode:
+        results = run_llm_judge_cross_compare(results_dir)
+    else:
+        results = run_llm_judge_evaluation(results_dir)
+    if results:
+        print_judge_summary(results)
 
 
 @app.command()
