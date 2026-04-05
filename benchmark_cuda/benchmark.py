@@ -266,6 +266,16 @@ def inspect(
     inspect_run(run_dir)
 
 
+@app.command("cross-compare")
+def cross_compare(
+    results_dir: str = typer.Option("./results", "--results-dir", "-d", help="Results directory"),
+    output_dir: Optional[str] = typer.Option(None, "--output-dir", "-o", help="Output directory for reports"),
+):
+    """Cross-mode comparison: Base vs LoRA vs QLoRA vs Full Fine-Tune."""
+    from .evaluation.cross_compare import run_cross_compare
+    run_cross_compare(results_dir, output_dir)
+
+
 @app.command()
 def prepare(
     data_dir: str = typer.Option("./data/processed", "--data-dir", help="Output data directory"),

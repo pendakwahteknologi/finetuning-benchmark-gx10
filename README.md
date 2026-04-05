@@ -1,8 +1,120 @@
 # Fine-Tuning Benchmark for ASUS Ascent GX10
 
-A CLI-first benchmarking suite for measuring and comparing LLM fine-tuning performance across GPU hardware. Built for the **ASUS Ascent GX10** powered by the **NVIDIA GB10** (Blackwell architecture) with 128 GB unified memory.
+A complete benchmarking suite for comparing LLM fine-tuning methods on real hardware. Trains **LoRA**, **QLoRA**, and **Full Fine-Tune** using the same model, dataset, and hyperparameters, then evaluates all three against the base model on 80 curated questions to determine which method produces the best results.
 
-This tool benchmarks three fine-tuning modes — **LoRA**, **QLoRA**, and **Full Fine-Tune** — using the same model, dataset, and hyperparameters, producing fair, reproducible timing comparisons with rich terminal output designed for video recording.
+Built and tested on the **ASUS Ascent GX10** — an ARM-based desktop powered by the **NVIDIA GB10** (Blackwell architecture) with **128 GB unified memory**.
+
+---
+
+## Results at a Glance
+
+All three fine-tuning methods trained **Llama 3.1 8B Instruct** for 500 steps on the Databricks Dolly 15k dataset, then answered 80 curated questions across 8 categories.
+
+### Training Performance
+
+| Metric | LoRA | QLoRA | Full Fine-Tune |
+|--------|-----:|------:|---------------:|
+| **Total Time** | 4h 48m | 9h 14m | 5h 06m |
+| **Avg Step Time** | 33.93s | 66.21s | 36.45s |
+| **Peak GPU Memory** | 87.4 GB | 12.4 GB | 93.6 GB |
+| **Final Loss** | 1.5124 | 1.6082 | 1.2897 |
+| **Tokens/sec** | 161.9 | 83.0 | 150.7 |
+| **Trainable Params** | 13.6M (0.17%) | 13.6M (0.17%) | 8.03B (100%) |
+
+### Evaluation: Base Model vs Fine-Tuned (80 Questions)
+
+| Metric | Base Model | LoRA | QLoRA | Full Fine-Tune |
+|--------|--------:|-----:|------:|---------------:|
+| **ROUGE-L** | 0.1554 | 0.1529 (-0.0025) | 0.1538 (-0.0016) | 0.1471 (-0.0083) |
+| **BLEU** | 0.0393 | 0.0404 (+0.0011) | 0.0429 (+0.0036) | 0.0405 (+0.0012) |
+| **Best Answer Wins** | -- | 32/80 (40%) | 24/80 (30%) | 24/80 (30%) |
+
+### Category Winners (ROUGE-L)
+
+| Category | Winner |
+|----------|--------|
+| Brainstorming | **LoRA** |
+| Classification | **QLoRA** |
+| Closed QA | **QLoRA** |
+| Creative Writing | **LoRA** |
+| General QA | **QLoRA** |
+| Information Extraction | **LoRA** |
+| Open QA | **LoRA** |
+| Summarization | **LoRA** |
+
+### Verdict
+
+| Award | Winner |
+|-------|--------|
+| Best Quality (ROUGE-L) | **QLoRA** |
+| Best Quality (BLEU) | **QLoRA** |
+| Most Per-Question Wins | **LoRA** (32/80) |
+| Fastest Training | **LoRA** (4h 48m) |
+| Lowest Memory Usage | **QLoRA** (12.4 GB) |
+| Lowest Final Loss | **Full Fine-Tune** (1.2897) |
+
+---
+
+## Key Findings
+
+### LoRA: Best All-Rounder
+
+LoRA won the most individual questions (32/80) and 5 out of 8 categories. It was also the fastest to train (4h 48m) with the highest throughput (161.9 tok/s). For most practical use cases on this hardware, LoRA offers the best balance of quality, speed, and simplicity.
+
+### QLoRA: Best for Memory-Constrained Environments
+
+QLoRA used only **12.4 GB** of GPU memory — 7x less than LoRA and Full FT. It achieved the highest overall ROUGE-L and BLEU scores despite being the slowest to train (9h 14m). The 2x slowdown comes from 4-bit dequantization overhead on ARM aarch64 with unified memory. On standard discrete GPUs, this gap would be smaller.
+
+### Full Fine-Tune: Lowest Loss, Not Necessarily Best Output
+
+Full FT achieved the lowest training loss (1.2897) by optimizing all 8 billion parameters, but this didn't translate to the best evaluation scores. It won zero categories and showed the largest ROUGE-L regression from baseline (-0.0083). This suggests 500 steps may not be enough for full parameter training to converge on output quality, or that the model may be overfitting to training patterns rather than generalizing well on the evaluation questions.
+
+### Why Do Fine-Tuned Scores Look Close to (or Below) Baseline?
+
+This is expected and worth explaining:
+
+1. **The base model is already instruction-tuned.** We used `Llama-3.1-8B-Instruct`, which Meta already fine-tuned on high-quality instruction data. Further fine-tuning on Dolly 15k (a smaller, community-generated dataset) can cause slight regression on general instruction-following.
+
+2. **500 steps is a short run.** This benchmark prioritizes fair, reproducible comparison across methods rather than training to convergence. A production fine-tune would typically run for 1-3 epochs (thousands of steps).
+
+3. **ROUGE-L and BLEU measure surface-level similarity.** The fine-tuned models often produce more concise, focused answers that score lower on token overlap but may actually be more useful. The side-by-side comparisons in the HTML report show this clearly.
+
+4. **The real value is in the comparison.** Even with modest absolute improvements, the relative differences between LoRA, QLoRA, and Full FT are meaningful and consistent.
+
+---
+
+## Challenges and Lessons Learned
+
+### QLoRA Crashes on ARM aarch64 at Higher Batch Sizes
+
+Running QLoRA with `micro_batch_size=8` caused the GX10 to **hard-reboot** after completing only 1 training step. No OOM-killer trace or GPU Xid error appeared in kernel logs, suggesting a hardware-level fault — likely a power spike or thermal event on the unified memory bus during 4-bit dequantization.
+
+**Root cause:** The bitsandbytes library's 4-bit CUDA kernels behave differently on ARM aarch64 with NVIDIA's unified (C2C) memory architecture. The dequantize-compute-quantize cycle at batch size 8 appears to create memory access patterns that destabilize the system, even though total memory usage was only 27.8 GB (well within the 128 GB available).
+
+**Workaround (applied automatically):** QLoRA mode now defaults to `micro_batch_size=2` with `gradient_accumulation_steps=16` (keeping effective batch size at 32) and enables gradient checkpointing. These settings trade training speed for stability.
+
+**Takeaway for others:** If you're running QLoRA on ARM-based systems with unified memory (Grace Hopper, GB10, Jetson), start with small batch sizes and scale up carefully. The memory headroom numbers can be misleading.
+
+### Full Fine-Tune Device Mismatch Error
+
+Using `device_map="auto"` with the accelerate library caused a "tensors on different devices" error — accelerate placed some layers (embedding tables) on CPU while the training loop expected everything on CUDA.
+
+**Fix:** Changed to `device_map="cuda"` in `benchmark_cuda/modes/fullft.py`. This is safe on the GX10 because the entire 8B model fits in GPU memory. On machines with less VRAM, you'd need to use `device_map="auto"` with proper handling for mixed-device tensors.
+
+### Unified Memory: Not the Same as More VRAM
+
+The GX10's 128 GB unified memory (shared via NVIDIA C2C) behaves differently from discrete GPU VRAM:
+
+- **Bandwidth:** Unified memory has lower bandwidth than dedicated HBM. This is why LoRA at 87 GB and Full FT at 93 GB still run at similar speeds — they're not bandwidth-limited in the same way a discrete GPU would be.
+- **QLoRA paradox:** Despite using only 12.4 GB (easily fits in any GPU's VRAM), QLoRA was the slowest mode. The 4-bit dequantization creates scattered memory access patterns that are particularly expensive on unified memory.
+- **Advantage:** The GX10 can run Full Fine-Tune of an 8B model without gradient checkpointing, CPU offloading, or model sharding. On a typical 24 GB GPU, this would be impossible without these techniques.
+
+### What Would We Do Differently?
+
+1. **Use the base model (not Instruct)** for a more dramatic before/after comparison. Fine-tuning an already instruction-tuned model makes the improvements subtle.
+2. **Train longer** (1000-2000 steps) to let Full Fine-Tune converge — 500 steps may underrepresent its potential.
+3. **Add human evaluation** alongside automated metrics — ROUGE-L and BLEU don't capture answer usefulness well.
+4. **Test multiple LoRA ranks** (4, 8, 16, 32, 64) to find the sweet spot for this model and dataset.
 
 ---
 
@@ -22,22 +134,27 @@ This tool benchmarks three fine-tuning modes — **LoRA**, **QLoRA**, and **Full
 
 ## What This Benchmarks
 
-| Mode | Description |
-|------|-------------|
-| **LoRA** | Lightweight adapter training — base model weights frozen, only small adapter matrices are trained |
-| **QLoRA** | 4-bit quantized base model with LoRA adapters — reduces memory footprint while training adapters |
-| **Full Fine-Tune** | All model parameters are trainable — true full parameter optimization |
+| Mode | Description | What Gets Trained |
+|------|-------------|-------------------|
+| **LoRA** | Lightweight adapter training — base model weights frozen, only small adapter matrices are trained | 13.6M params (0.17%) |
+| **QLoRA** | 4-bit quantized base model with LoRA adapters — reduces memory footprint while training adapters | 13.6M params (0.17%) |
+| **Full Fine-Tune** | All model parameters are trainable — true full parameter optimization | 8.03B params (100%) |
 
 All three modes use the same base model, dataset, prompt format, sequence length, seed, and step count to ensure a fair comparison.
 
-### What Gets Measured
+### Metrics Collected
 
-- Total training wall-clock time
-- Average / median / P95 step time
+**Training:**
+- Total wall-clock time, average / median / P95 step time
 - Peak GPU memory usage
 - Tokens per second and samples per second
-- Final training loss
-- Before vs after evaluation (ROUGE-L, BLEU, side-by-side generation comparison)
+- Final training loss, validation loss at checkpoints
+
+**Evaluation:**
+- ROUGE-L and BLEU scores vs reference answers
+- Per-category breakdown (8 categories, 10 questions each)
+- Side-by-side generation comparison (base model vs fine-tuned)
+- Cross-mode comparison (which fine-tuning method wins per question)
 
 ---
 
@@ -45,258 +162,194 @@ All three modes use the same base model, dataset, prompt format, sequence length
 
 | | Details |
 |---|---|
-| **Base Model** | [`meta-llama/Llama-3.1-8B`](https://huggingface.co/meta-llama/Llama-3.1-8B) (base, not Instruct) |
+| **Base Model** | [`meta-llama/Llama-3.1-8B-Instruct`](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct) |
 | **Dataset** | [`databricks/databricks-dolly-15k`](https://huggingface.co/datasets/databricks/databricks-dolly-15k) |
 | **Split** | 90% train / 5% validation / 5% test (seed 42) |
 | **Evaluation** | 80 preset questions (10 per category) from held-out test set |
 
-We use the **base** model (not Instruct) so the before/after difference is dramatic — the base model cannot follow instructions, while the fine-tuned model produces clean, structured answers.
+**Categories evaluated:** brainstorming, classification, closed QA, creative writing, general QA, information extraction, open QA, summarization.
 
 ---
 
-## Setup
+## Quick Start
 
-### 1. Clone the Repository
-
-```bash
-git clone https://github.com/pendakwahteknologi/finetuning-benchmark-gx10.git
-cd finetuning-benchmark-gx10
-```
-
-### 2. Install Dependencies
+### 1. Clone and Install
 
 ```bash
+git clone https://github.com/pendakwahteknologi/Fine-Tuning-Benchmark-GX10.git
+cd Fine-Tuning-Benchmark-GX10
 pip install -r benchmark_cuda/requirements.txt --break-system-packages
 ```
 
-The core dependencies are:
-- `torch` (with CUDA support)
-- `transformers`, `peft`, `datasets`, `accelerate`
-- `bitsandbytes` (for QLoRA)
-- `rich`, `typer` (for terminal UI)
-- `rouge-score`, `nltk` (for evaluation metrics)
-
-### 3. Set Up Hugging Face Access
+### 2. Set Up Hugging Face Access
 
 The Llama 3.1 model is gated — you need a Hugging Face account with access granted.
 
-**Step 1:** Create a Hugging Face account at [huggingface.co](https://huggingface.co)
-
-**Step 2:** Go to the model page and request access:
-- [meta-llama/Llama-3.1-8B](https://huggingface.co/meta-llama/Llama-3.1-8B)
-- Click **"Request access"** and accept the license agreement
-- Access is usually granted within minutes
-
-**Step 3:** Create an access token:
-- Go to [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)
-- Click **"Create new token"**
-- Name it (e.g., `gx10-benchmark`)
-- Set type to **Read**
-- Copy the token (starts with `hf_`)
-
-**Step 4:** Save the token on your machine:
+1. Create a [Hugging Face account](https://huggingface.co)
+2. Request access at [meta-llama/Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct) (usually granted within minutes)
+3. Create a [read token](https://huggingface.co/settings/tokens) and save it:
 
 ```bash
 mkdir -p ~/.cache/huggingface
 echo "hf_YOUR_TOKEN_HERE" > ~/.cache/huggingface/token
 ```
 
-**Step 5:** Verify access:
+4. Verify: `python3 -c "from huggingface_hub import HfApi; print(HfApi().whoami()['name'])"`
+
+### 3. Run Everything
+
+**Full benchmark (all three modes + comparison reports):**
 
 ```bash
-python3 -c "from huggingface_hub import HfApi; api = HfApi(); print(api.whoami()['name'])"
+./run_all.sh
 ```
 
-If this prints your username, you're ready.
-
-### 4. Pre-Download Model and Data
-
-To avoid downloads during benchmarking, cache everything first:
+**Background (safe to close terminal):**
 
 ```bash
-python3 -c "
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from datasets import load_dataset
-import torch
-
-print('Downloading tokenizer...')
-AutoTokenizer.from_pretrained('meta-llama/Llama-3.1-8B')
-
-print('Downloading model...')
-model = AutoModelForCausalLM.from_pretrained('meta-llama/Llama-3.1-8B', dtype=torch.bfloat16)
-del model
-
-print('Downloading dataset...')
-load_dataset('databricks/databricks-dolly-15k', split='train')
-
-print('All cached and ready.')
-"
+nohup ./run_all.sh > benchmark_all.log 2>&1 &
+tail -f benchmark_all.log
 ```
 
-### 5. Prepare Dataset Splits
+**Quick sanity check (5 steps, no evaluation):**
 
 ```bash
-python3 -m benchmark_cuda prepare
+./run_all.sh --dry-run
 ```
 
-This creates:
-- `data/processed/train.jsonl` (13,509 samples)
-- `data/processed/val.jsonl` (750 samples)
-- `data/processed/test.jsonl` (752 samples)
-- `data/eval/preset_questions.jsonl` (80 evaluation questions)
+**On a different machine:**
+
+```bash
+./run_all.sh --machine-label rtx5090
+```
+
+This runs: data preparation, LoRA training, QLoRA training, Full Fine-Tune training, training comparison, and cross-mode evaluation report — fully automated.
+
+Expected time on GX10: ~19 hours total (LoRA ~5h + QLoRA ~9h + Full FT ~5h).
+
+### 4. Generate Comparison Reports (After Training)
+
+If training is already complete, generate all comparison reports without retraining:
+
+```bash
+./run_comparison.sh
+```
+
+This produces:
+- Rich terminal tables with color-coded metrics and verdict
+- `results/cross_comparison/cross_comparison.html` — Interactive dark-themed HTML report
+- `results/cross_comparison/cross_comparison.md` — Markdown report for documentation
+- `results/cross_comparison/cross_comparison.csv` — Per-question metrics for spreadsheets
+- `results/cross_comparison/cross_comparison.json` — Full machine-readable data
 
 ---
 
 ## Usage
 
-### Quick Test (Dry Run)
-
-Run 5 steps to verify everything works:
+### Individual Commands
 
 ```bash
-python3 -m benchmark_cuda run --mode lora --dry-run --machine-label gx10
-```
-
-### Run Benchmarks
-
-```bash
-# LoRA fine-tuning
+# Run a single mode
 python3 -m benchmark_cuda run --mode lora --machine-label gx10 --max-steps 500
-
-# QLoRA fine-tuning
 python3 -m benchmark_cuda run --mode qlora --machine-label gx10 --max-steps 500
-
-# Full fine-tuning
 python3 -m benchmark_cuda run --mode fullft --machine-label gx10 --max-steps 500
-```
 
-### Run All Three Sequentially (Background)
-
-Each benchmark takes several hours (LoRA ~5h, QLoRA ~9h, Full FT ~5h on the GX10). You can run all three back-to-back in the background so you don't need to babysit the terminal:
-
-```bash
-nohup bash -c '
-python3 -m benchmark_cuda run --mode lora --machine-label gx10 --max-steps 500 2>&1 | tee lora_run.log
-python3 -m benchmark_cuda run --mode qlora --machine-label gx10 --max-steps 500 2>&1 | tee qlora_run.log
-python3 -m benchmark_cuda run --mode fullft --machine-label gx10 --max-steps 500 2>&1 | tee fullft_run.log
-python3 -m benchmark_cuda compare --results-dir ./results 2>&1 | tee compare_run.log
-' > benchmark_all.log 2>&1 &
-```
-
-This runs LoRA first, then QLoRA, then Full FT, and finally produces a comparison — all automatically. You can safely close the terminal or SSH session and come back later. All results are saved to `./results/`.
-
-### Monitoring Progress
-
-```bash
-# See the latest output
-tail -20 benchmark_all.log
-
-# Follow live (Ctrl+C to stop watching, benchmark continues)
-tail -f benchmark_all.log
-
-# Check which mode is currently running
-grep -E "Mode:|Step " benchmark_all.log | tail -5
-
-# Check if the background job is still running
-jobs
-# or
-ps aux | grep benchmark_cuda | grep -v grep
-
-# Check GPU activity
-nvidia-smi
-```
-
-### Checking Individual Run Logs
-
-Each mode also writes its own log file:
-
-```bash
-tail -20 lora_run.log      # LoRA progress
-tail -20 qlora_run.log     # QLoRA progress
-tail -20 fullft_run.log    # Full FT progress
-tail -20 compare_run.log   # Final comparison output
-```
-
-### When It's Done
-
-When all benchmarks are complete, you'll find result folders in `./results/`:
-
-```bash
-ls ./results/
-```
-
-Each folder contains the full metrics, logs, and evaluation artifacts. Run the compare command to see the final summary table:
-
-```bash
+# Training metrics comparison table
 python3 -m benchmark_cuda compare --results-dir ./results
+
+# Cross-mode evaluation (Base vs LoRA vs QLoRA vs Full FT)
+python3 -m benchmark_cuda cross-compare --results-dir ./results
+
+# Inspect a single run
+python3 -m benchmark_cuda inspect --run ./results/gx10_lora_20260403_140352
+
+# Prepare dataset only (no training)
+python3 -m benchmark_cuda prepare
 ```
 
-### Compare Results
-
-```bash
-python3 -m benchmark_cuda compare --results-dir ./results
-```
-
-### Inspect a Single Run
-
-```bash
-python3 -m benchmark_cuda inspect --run ./results/gx10_lora_20260403_140000
-```
-
----
-
-## CLI Options
+### CLI Options
 
 ```
 python3 -m benchmark_cuda run [OPTIONS]
 
 Options:
-  --machine-label, -m    Machine identifier             [default: gx10]
-  --mode                 Training mode: lora, qlora, fullft  [default: lora]
-  --model                HuggingFace model name         [default: meta-llama/Llama-3.1-8B]
-  --max-steps            Number of optimizer steps       [default: 500]
-  --warmup-steps         Steps excluded from timing      [default: 3]
-  --seq-len              Maximum sequence length         [default: 1024]
-  --micro-batch-size     Batch size per step
-  --grad-accum           Gradient accumulation steps
-  --learning-rate, --lr  Learning rate
-  --dtype                Precision: bfloat16, float16    [default: bfloat16]
+  --machine-label, -m       Machine identifier              [default: gx10]
+  --mode                    Training mode: lora, qlora, fullft
+  --model                   HuggingFace model name          [default: meta-llama/Llama-3.1-8B]
+  --max-steps               Number of optimizer steps        [default: 500]
+  --warmup-steps            Steps excluded from timing       [default: 3]
+  --seq-len                 Maximum sequence length          [default: 1024]
+  --micro-batch-size        Batch size per step
+  --grad-accum              Gradient accumulation steps
+  --learning-rate, --lr     Learning rate
+  --dtype                   Precision: bfloat16, float16     [default: bfloat16]
   --gradient-checkpointing  Enable gradient checkpointing
-  --lora-r               LoRA rank                       [default: 16]
-  --lora-alpha           LoRA alpha                      [default: 32]
-  --seed                 Random seed                     [default: 42]
-  --logging-steps        Log every N steps               [default: 10]
-  --eval-steps           Validate every N steps          [default: 100]
-  --skip-eval            Skip post-training evaluation
-  --dry-run              Run 5 steps only, skip evaluation
-  --output-dir           Output directory                [default: ./results]
+  --lora-r                  LoRA rank                        [default: 16]
+  --lora-alpha              LoRA alpha                       [default: 32]
+  --seed                    Random seed                      [default: 42]
+  --logging-steps           Log every N steps                [default: 10]
+  --eval-steps              Validate every N steps           [default: 100]
+  --skip-eval               Skip post-training evaluation
+  --dry-run                 Run 5 steps only, skip evaluation
+  --output-dir              Output directory                 [default: ./results]
 ```
+
+### Monitoring a Background Run
+
+```bash
+tail -f benchmark_all.log                          # Follow live output
+grep -E "Mode:|Step " benchmark_all.log | tail -5  # Check current progress
+ps aux | grep benchmark_cuda | grep -v grep        # Check if running
+nvidia-smi                                         # Check GPU activity
+```
+
+---
+
+## GX10-Optimized Defaults
+
+The benchmark defaults are tuned for the GX10's 128 GB unified memory:
+
+| Parameter | LoRA | QLoRA | Full FT |
+|-----------|------|-------|---------|
+| Micro batch size | 8 | 2 | 4 |
+| Gradient accumulation | 4 | 16 | 8 |
+| Effective batch size | 32 | 32 | 32 |
+| Learning rate | 2e-4 | 2e-4 | 2e-5 |
+| Precision | bf16 | bf16 | bf16 |
+| Attention | SDPA | SDPA | SDPA |
+| Gradient checkpointing | No | Yes | No |
+
+QLoRA uses smaller batch sizes and gradient checkpointing due to stability issues on ARM aarch64 with unified memory (see [Challenges](#challenges-and-lessons-learned)).
 
 ---
 
 ## Output Structure
 
-Each benchmark run produces a complete result folder:
-
 ```
 results/
-  gx10_lora_20260403_140000/
-    config.json                 # Full run configuration
-    benchmark_metrics.json      # Aggregated metrics
-    benchmark_metrics.csv       # Per-step metrics
-    train.log                   # Full training log
-    summary.txt                 # Human-readable summary
-    system_info.json            # System details
-    gpu_info.json               # GPU details
+  gx10_lora_20260403_140352/
+    config.json                       # Full run configuration
+    benchmark_metrics.json            # Aggregated training metrics
+    benchmark_metrics.csv             # Per-step training metrics
+    train.log                         # Full training log
+    summary.txt                       # Human-readable summary
+    system_info.json                  # System hardware details
+    gpu_info.json                     # GPU details
     evaluation/
-      preset_questions.jsonl    # The 80 evaluation questions
-      baseline_predictions.jsonl    # Base model answers
-      finetuned_predictions.jsonl   # Fine-tuned model answers
-      side_by_side_comparison.jsonl # Side-by-side comparison
-      evaluation_metrics.json   # ROUGE-L, BLEU, per-category scores
-      evaluation_metrics.csv    # Metrics in CSV format
-      evaluation_summary.md     # Markdown summary report
-      evaluation_table.html     # Visual HTML comparison table
+      preset_questions.jsonl          # The 80 evaluation questions
+      baseline_predictions.jsonl      # Base model answers
+      finetuned_predictions.jsonl     # Fine-tuned model answers
+      side_by_side_comparison.jsonl   # Per-question comparison
+      evaluation_metrics.json         # ROUGE-L, BLEU, per-category
+      evaluation_metrics.csv          # Metrics in CSV format
+      evaluation_summary.md           # Markdown evaluation report
+      evaluation_table.html           # Visual HTML comparison
+
+  cross_comparison/                   # Generated by cross-compare
+    cross_comparison.html             # Interactive HTML report
+    cross_comparison.md               # Markdown report
+    cross_comparison.csv              # Per-question CSV
+    cross_comparison.json             # Full machine-readable data
 ```
 
 ---
@@ -309,183 +362,37 @@ All runs use identical:
 - Base model and tokenizer
 - Dataset splits and preprocessing
 - Prompt template (Alpaca-style)
-- Sequence length (1024)
-- Random seed (42)
-- Number of steps (500)
+- Sequence length (1024), random seed (42), step count (500)
 - Logging and evaluation frequency
-- Evaluation inference settings (temperature=0, deterministic decoding)
+- Evaluation inference settings (temperature=0, deterministic)
 
-If any parameter must differ due to hardware constraints (e.g., smaller batch size on a GPU with less memory), the difference is explicitly logged in `config.json` under `fairness_notes`.
+If any parameter differs due to hardware constraints (e.g., smaller batch size), it is explicitly logged in `config.json` under `fairness_notes`.
 
 ### Timing
 
-The benchmark measures **training time only**:
-- Includes: forward pass, backward pass, optimizer steps, validation
-- Excludes: model download, dataset download, tokenization, environment setup
+Measures **training time only** — excludes model download, dataset download, tokenization, and environment setup. The first 3 steps are treated as warmup (CUDA kernel compilation) and excluded from timing statistics.
 
-The first 3 steps are treated as warmup (CUDA kernel compilation, JIT) and excluded from timing statistics.
+### Evaluation Pipeline
 
-### Failure Handling
+After training completes, the evaluation pipeline:
+1. Loads the **base model** (unmodified) and runs inference on 80 curated questions
+2. Runs the same 80 questions through the **fine-tuned model**
+3. Computes ROUGE-L, BLEU, exact match, and normalized match scores
+4. Generates side-by-side comparisons with per-category breakdowns
 
-If a run hits an out-of-memory error or other failure:
-- A clear failure banner is printed
-- The failure reason is saved in metrics
-- Partial results are still written to disk
-- Status is marked as `oom`, `failed`, or `interrupted`
-
----
-
-## GX10-Optimized Defaults
-
-The benchmark defaults are tuned for the GX10's 128 GB unified memory:
-
-| Parameter | LoRA | QLoRA | Full FT |
-|-----------|------|-------|---------|
-| Micro batch size | 8 | **2** | 4 |
-| Gradient accumulation | 4 | **16** | 8 |
-| Effective batch size | 32 | 32 | 32 |
-| Learning rate | 2e-4 | 2e-4 | 2e-5 |
-| Precision | bf16 | bf16 | bf16 |
-| Attention | SDPA | SDPA | SDPA |
-| Gradient checkpointing | No | **Yes** | No |
-
-> **Note:** QLoRA defaults were reduced from `micro_batch_size=8` after repeated system crashes on the GX10. The 4-bit quantization path via bitsandbytes on ARM aarch64 with unified memory appears to trigger instability at higher batch sizes. See [Known Issues](#known-issues) for details.
-
-The GX10 can run Full Fine-Tune of an 8B parameter model natively without offloading — a task that would require gradient checkpointing or CPU offload on GPUs with less memory.
-
----
-
-## Results (GX10)
-
-### LoRA — 500 Steps (Success)
-
-Run ID: `gx10_lora_20260403_140352`
-
-| Metric | Value |
-|--------|-------|
-| **Status** | Success |
-| **Total wall clock** | 4 h 48 min (17,268 s) |
-| **Avg step time** | 33.93 s |
-| **Median step time** | 33.93 s |
-| **P95 step time** | 34.01 s |
-| **Peak GPU memory** | 87.38 GB |
-| **Final training loss** | 1.5124 |
-| **Tokens/sec** | 161.9 |
-| **Samples/sec** | 0.24 |
-
-**Evaluation highlights (vs base model):**
-- ROUGE-L: 0.1554 (base) vs 0.1529 (fine-tuned)
-- BLEU: 0.0393 (base) vs 0.0404 (fine-tuned)
-- Average prediction length increased by +15.28 tokens
-
-Full evaluation artifacts (side-by-side comparison, per-category breakdown, HTML table) are in `results/gx10_lora_20260403_140352/evaluation/`.
-
-### QLoRA — 500 Steps (Success, 2nd attempt)
-
-Run ID: `gx10_qlora_20260404_001959`
-
-| Metric | Value |
-|--------|-------|
-| **Status** | Success |
-| **Total wall clock** | 9 h 14 min (33,231 s) |
-| **Avg step time** | 66.21 s |
-| **Median step time** | 66.20 s |
-| **P95 step time** | 66.36 s |
-| **Peak GPU memory** | 12.45 GB |
-| **Final training loss** | 1.6082 |
-| **Tokens/sec** | 83.0 |
-| **Samples/sec** | 0.03 |
-
-**Evaluation highlights (vs base model):**
-- ROUGE-L: 0.1554 (base) vs 0.1538 (fine-tuned)
-- BLEU: 0.0393 (base) vs 0.0429 (fine-tuned)
-- Average prediction length increased by +12.84 tokens
-
-> **Note:** The first QLoRA attempt (`gx10_qlora_20260403_231403`) crashed after 1 step with `micro_batch_size=8`. Config defaults were adjusted (batch size reduced to 2, gradient checkpointing enabled) and the second attempt completed successfully. See [Known Issues](#known-issues).
-
-Full evaluation artifacts are in `results/gx10_qlora_20260404_001959/evaluation/`.
-
-### Full Fine-Tune — 5-Step Dry Run (Success)
-
-Run ID: `gx10_fullft_20260404_224612`
-
-| Metric | Value |
-|--------|-------|
-| **Status** | Success (dry run) |
-| **Steps completed** | 5 / 5 |
-| **Total wall clock** | 3 min 3 s (183 s) |
-| **Avg step time** | 36.29 s |
-| **Median step time** | 36.18 s |
-| **P95 step time** | 36.60 s |
-| **Peak GPU memory** | 93.59 GB |
-| **Final training loss** | 1.6391 |
-| **Tokens/sec** | 121.3 |
-| **Samples/sec** | 0.11 |
-
-> **Note:** This is a 5-step validation run confirming the full fine-tune mode works correctly. The full 500-step run is pending. At ~36 s/step, expect approximately 5 hours for the complete benchmark.
-
-### Summary Comparison
-
-| Metric | LoRA | QLoRA | Full FT (dry run) |
-|--------|------|-------|-------------------|
-| **Steps** | 500 | 500 | 5 |
-| **Status** | Success | Success | Success |
-| **Total time** | 4 h 48 min | 9 h 14 min | 3 min |
-| **Avg step time** | 33.93 s | 66.21 s | 36.29 s |
-| **Peak GPU memory** | 87.38 GB | 12.45 GB | 93.59 GB |
-| **Final loss** | 1.5124 | 1.6082 | 1.6391 |
-| **Tokens/sec** | 161.9 | 83.0 | 121.3 |
-| **Trainable params** | 13.6M (0.17%) | 13.6M (0.17%) | 8.03B (100%) |
-
-**Key observations:**
-- **LoRA** is the fastest mode at 33.93 s/step, achieving the best throughput (161.9 tok/s)
-- **QLoRA** uses dramatically less memory (12.45 GB vs 87+ GB) but is ~2x slower due to 4-bit dequantization overhead on ARM aarch64
-- **Full FT** trains all 8B parameters with 93.59 GB peak memory — feasible on the GX10's 128 GB unified memory without offloading
-
----
-
-## Known Issues
-
-### QLoRA crashes the GX10 at default batch sizes
-
-**Issue:** [#1 on GitHub](https://github.com/pendakwahteknologi/finetuning-benchmark-gx10/issues/1)
-
-Running QLoRA with `micro_batch_size=8` and `gradient_checkpointing=false` causes the ASUS Ascent GX10 to hard-reboot after completing only 1 training step. The system crash leaves no OOM-killer trace or GPU Xid error in kernel logs, suggesting a hardware-level fault (thermal throttle or power spike on the unified memory bus during 4-bit dequantization).
-
-**Workaround (applied):** QLoRA mode now defaults to:
-- `micro_batch_size=2` (down from 8)
-- `gradient_accumulation_steps=16` (keeps effective batch size at 32)
-- `gradient_checkpointing=true` (reduces peak memory)
-
-This is automatically applied in `benchmark_cuda/utils/config.py` when `--mode qlora` is selected. To override, pass explicit `--micro-batch-size` and `--gradient-checkpointing` flags.
-
-**Context:**
-- LoRA runs successfully at `micro_batch_size=8` with 87.38 GB peak memory
-- QLoRA step 1 used only 27.83 GB but took 62.4 s (vs 33.9 s for LoRA)
-- The slower step time + lower memory suggests bitsandbytes 4-bit kernels may behave differently on ARM aarch64 / Blackwell unified memory
-- GPU temp was 73°C at the time of the crash with ComfyUI, visitor-analytics, and Open WebUI also consuming GPU resources
-
-### Full Fine-Tune failed with device mismatch error
-
-**Issue:** Using `device_map="auto"` in `fullft.py` caused a "tensors on different devices" error. The accelerate library placed some layers (e.g., embedding tables) on CPU while the training loop expected all tensors on CUDA.
-
-**Fix (applied):** Changed `device_map="auto"` to `device_map="cuda"` in `benchmark_cuda/modes/fullft.py`. This places the entire model on GPU, which is safe on the GX10's 128 GB unified memory where the 8B model fits comfortably. LoRA and QLoRA are unaffected because PEFT handles device placement internally.
+The `cross-compare` command then aggregates all three modes into a unified comparison, ranking which method produces the best output for each question and category.
 
 ---
 
 ## Cross-Machine Comparison
 
-This tool is designed to compare the GX10 against other machines (e.g., RTX 5090). Run the same benchmarks on a different machine:
+This tool is designed to compare hardware. Run the same benchmark on different machines:
 
 ```bash
-python3 -m benchmark_cuda run --mode lora --machine-label rtx5090 --max-steps 500
-python3 -m benchmark_cuda run --mode qlora --machine-label rtx5090 --max-steps 500
-python3 -m benchmark_cuda run --mode fullft --machine-label rtx5090 --max-steps 500
-```
+# On machine 2
+./run_all.sh --machine-label rtx5090
 
-Then copy all result folders into one `results/` directory and compare:
-
-```bash
+# Copy results to one directory and compare
 python3 -m benchmark_cuda compare --results-dir ./results
 ```
 
@@ -495,39 +402,41 @@ python3 -m benchmark_cuda compare --results-dir ./results
 
 ```
 benchmark_cuda/
-  benchmark.py              # CLI entrypoint (run / compare / inspect / prepare)
-  trainer.py                # Shared training loop with timing and progress display
+  benchmark.py                # CLI entrypoint (run / compare / cross-compare / inspect / prepare)
+  trainer.py                  # Shared training loop with timing and progress display
   modes/
-    lora.py                 # LoRA mode: freeze base, attach PEFT adapters
-    qlora.py                # QLoRA mode: 4-bit quantized base + LoRA adapters
-    fullft.py               # Full FT mode: all parameters trainable
+    lora.py                   # LoRA: freeze base, attach PEFT adapters
+    qlora.py                  # QLoRA: 4-bit quantized base + LoRA adapters
+    fullft.py                 # Full FT: all parameters trainable
   data/
-    prepare.py              # Load dataset, normalize, split, save JSONL
-    prompt_format.py        # Alpaca-style prompt template
-    preset_questions.py     # Sample evaluation questions from test split
+    prepare.py                # Load dataset, normalize, split, save JSONL
+    prompt_format.py          # Alpaca-style prompt template
+    preset_questions.py       # Sample evaluation questions from test split
   evaluation/
-    evaluate.py             # Baseline vs fine-tuned inference pipeline
-    eval_metrics.py         # ROUGE-L, BLEU, exact match, per-category
-    compare_models.py       # Side-by-side comparison generation
+    evaluate.py               # Baseline vs fine-tuned inference pipeline
+    eval_metrics.py           # ROUGE-L, BLEU, exact match, per-category
+    compare_models.py         # Single-run side-by-side comparison
+    cross_compare.py          # Cross-mode comparison (all modes at once)
   utils/
-    config.py               # Benchmark configuration dataclass
-    logging_utils.py        # Rich terminal output + file logging
-    metrics.py              # Step timing, memory tracking, aggregation
-    system_info.py          # System and GPU information capture
-    gpu_monitor.py          # Background GPU memory monitoring
+    config.py                 # Benchmark configuration dataclass
+    logging_utils.py          # Rich terminal output + file logging
+    metrics.py                # Step timing, memory tracking, aggregation
+    system_info.py            # System and GPU information capture
+    gpu_monitor.py            # Background GPU memory monitoring
   commands/
-    compare.py              # Cross-run comparison tables
-    inspect.py              # Single-run detail viewer
-  requirements.txt
+    compare.py                # Cross-run training comparison tables
+    inspect.py                # Single-run detail viewer
+run_all.sh                    # Full benchmark: train all modes + generate reports
+run_comparison.sh             # Generate comparison reports from existing results
 ```
 
 ---
 
 ## Acknowledgments
 
-- Workflow inspired by [pendakwahteknologi/finetune-rocm](https://github.com/pendakwahteknologi/finetune-rocm)
-- Base model: [Meta Llama 3.1](https://huggingface.co/meta-llama/Llama-3.1-8B)
+- Base model: [Meta Llama 3.1](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct)
 - Dataset: [Databricks Dolly 15k](https://huggingface.co/datasets/databricks/databricks-dolly-15k)
+- Fine-tuning libraries: [Hugging Face Transformers](https://github.com/huggingface/transformers), [PEFT](https://github.com/huggingface/peft), [bitsandbytes](https://github.com/TimDettmers/bitsandbytes)
 
 ---
 
