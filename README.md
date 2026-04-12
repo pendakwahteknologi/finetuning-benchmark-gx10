@@ -398,6 +398,23 @@ python3 -m benchmark_cuda compare --results-dir ./results
 
 ---
 
+## Cross-Model Comparison (Instruct vs Base)
+
+A standalone script compares LoRA fine-tuning results between the Instruct and Base variants of Llama 3.1 8B:
+
+```bash
+python3 scripts/cross_model_compare.py
+```
+
+This reads evaluation data from two LoRA runs (one using `Llama-3.1-8B-Instruct`, the other using `Llama-3.1-8B`) and produces:
+
+- `results/cross_model_comparison/cross_model_comparison.html` -- Interactive dark-themed HTML report with 80 questions side-by-side
+- `results/cross_model_comparison/cross_model_comparison.md` -- Markdown summary
+- `results/cross_model_comparison/cross_model_comparison.json` -- Full machine-readable data
+- `results/cross_model_comparison/cross_model_comparison.csv` -- Per-question metrics
+
+---
+
 ## Project Structure
 
 ```
@@ -427,7 +444,10 @@ benchmark_cuda/
     compare.py                # Cross-run training comparison tables
     inspect.py                # Single-run detail viewer
 run_all.sh                    # Full benchmark: train all modes + generate reports
+run_benchmark.sh              # Single script for complete benchmark pipeline
 run_comparison.sh             # Generate comparison reports from existing results
+scripts/
+  cross_model_compare.py      # Cross-model comparison (Instruct vs Base LoRA)
 ```
 
 ---
